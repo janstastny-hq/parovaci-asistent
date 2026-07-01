@@ -128,42 +128,57 @@ function jePreklep(z, zk) {
   return d > 0 && d <= max;
 }
 
+// Kvalita shody dvou kmenů: přesná = 1, prefix/substring = 0.6, překlep = 0.4, jinak 0.
+function shodaSlov(a, b) {
+  if (a === b) return 1;
+  if ((a.length >= 3 && b.includes(a)) || (b.length >= 3 && a.includes(b))) return 0.6;
+  if (jePreklep(a, b)) return 0.4;
+  return 0;
+}
+
+// Obecné skóre shody kategorie s dotazem — BEZ výjimek pro konkrétní kategorie.
+// Kombinuje: kolik slov kategorie je pokryto (přesnost) × kolik slov dotazu je využito (úplnost).
+function skorujKategorii(Q, L) {
+  if (!Q.length || !L.length) return 0;
+  let pokrytoVaha = 0, pokrytoPocet = 0, presnych = 0;
+  for (const l of L) {
+    let nej = 0;
+    for (const q of Q) { const w = shodaSlov(q, l); if (w > nej) nej = w; }
+    if (nej > 0) { pokrytoVaha += nej; pokrytoPocet++; if (nej === 1) presnych++; }
+  }
+  if (pokrytoPocet === 0) return 0;
+  let dotazPokryto = 0;
+  for (const q of Q) { for (const l of L) { if (shodaSlov(q, l) > 0) { dotazPokryto++; break; } } }
+
+  const presnost = pokrytoVaha / L.length;      // jak moc je kategorie "právě o tom" (0–1)
+  const uplnost = dotazPokryto / Q.length;       // jak moc dotaz využit (0–1)
+  const nepokrytychSlovKat = L.length - pokrytoPocet;
+
+  return pokrytoPocet * 100      // absolutní: víc trefených slov = líp
+       + presnost * 400          // přesnost: celá kategorie odpovídá dotazu
+       + uplnost * 100           // úplnost: dotaz je využitý
+       + presnych * 5            // jemné: přesné shody > fuzzy
+       - nepokrytychSlovKat * 30; // mírná penalizace za "navíc" slova kategorie
+}
+
+// slova, která do shody nepřispívají (spojky/předložky)
+const STOPSLOVA = new Set(['a', 'na', 'do', 'ke', 'ke', 'se', 've', 'za', 'po', 'od', 'pro', 'the', 'of']);
+
 function vyhledejPresnouLogikou(nazevProduktu) {
   const nazevLower = nazevProduktu.toLowerCase();
   let rozsireny = nazevProduktu;
   for (const [k, v] of Object.entries(SYNONYMA)) if (nazevLower.includes(k)) rozsireny += ' ' + v;
 
-  const puvodniSlova = rozsireny.split(/\s+/).map(s => s.toLowerCase()).filter(s => s.length >= 2);
-  if (!puvodniSlova.length) return [];
-  const zakladyHledanych = puvodniSlova.map(dejZakladSlova);
-  const hledaMobil = ['mobil', 'telefon', 'tel', 'phone'].some(m => zakladyHledanych.includes(dejZakladSlova(m)));
+  const slova = rozsireny.split(/\s+/).map(s => s.toLowerCase()).filter(s => s.length >= 3 && !STOPSLOVA.has(s));
+  const Q = [...new Set(slova.map(dejZakladSlova))].filter(Boolean);
+  if (!Q.length) return [];
 
   const vysledky = [];
   for (const kat of CATEGORIES) {
-    const katLower = kat.toLowerCase();
-    const casti = katLower.split('|').map(c => c.trim());
-    const posledni = casti.length ? casti[casti.length - 1] : '';
-    const slovaKonce = posledni.split(/\s+/).filter(s => s.length > 2);
-    const zakladyKonce = slovaKonce.map(dejZakladSlova);
-
-    let body = 0, pocet = 0;
-    for (const z of zakladyHledanych) {
-      for (const zk of zakladyKonce) {
-        if (z === zk) { body += 100; pocet++; }
-        else if (z.includes(zk) || zk.includes(z)) { body += 50; pocet++; }
-        else if (jePreklep(z, zk)) { body += 40; pocet++; }
-      }
-    }
-    if (pocet > 0) {
-      if (pocet > 1) body += (pocet - 1) * 150;
-      if (zakladyKonce.length === 1 && zakladyHledanych.some(z => z === zakladyKonce[0])) body += 5000;
-      for (const zk of zakladyKonce) if (!zakladyHledanych.includes(zk)) body -= 10;
-      if (hledaMobil && posledni.includes('mobilní telefony')) body += 8000;
-      if (posledni.includes('příslušenství') || posledni.includes('pouzdra') || posledni.includes('kryty') || posledni.includes('chemie')) {
-        if (!['pouzdro','obal','kryt','drzak','prislusenstvi','chemie','filtrace'].some(p => zakladyHledanych.includes(p))) body -= 1500;
-      }
-      if (body > 0) vysledky.push({ cesta: kat, shody: body });
-    }
+    const posledni = kat.split('|').pop().trim().toLowerCase();
+    const L = [...new Set(posledni.split(/\s+/).filter(s => s.length > 2 && !STOPSLOVA.has(s)).map(dejZakladSlova))].filter(Boolean);
+    const s = skorujKategorii(Q, L);
+    if (s > 0) vysledky.push({ cesta: kat, shody: s });
   }
   return vysledky.sort((a, b) => b.shody - a.shody);
 }
