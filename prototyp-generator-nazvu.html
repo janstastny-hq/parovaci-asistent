@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Generátor názvu — pískoviště (nanečisto)</title>
+<style>
+  html, body, #root { height: 100%; margin: 0; }
+  body { font-family: system-ui, Avenir, Helvetica, Arial, sans-serif; background: #f0f2f5; }
+  .page { max-width: 760px; margin: 0 auto; padding: 32px 24px 80px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@19.0.0",
+    "react/jsx-runtime": "https://esm.sh/react@19.0.0/jsx-runtime",
+    "react-dom": "https://esm.sh/react-dom@19.0.0?deps=react@19.0.0",
+    "react-dom/client": "https://esm.sh/react-dom@19.0.0/client?deps=react@19.0.0",
+    "antd": "https://esm.sh/antd@6.0.0?external=react,react-dom&bundle-deps",
+    "@ant-design/icons": "https://esm.sh/@ant-design/icons@6.0.0?external=react,react-dom&bundle-deps",
+    "htm": "https://esm.sh/htm@3.1.1"
+  }
+}
+</script>
+
+<script type="module">
+import React, { useState, useMemo } from 'react';
+import { createRoot } from 'react-dom/client';
+import * as antd from 'antd';
+import * as Icons from '@ant-design/icons';
+import htm from 'htm';
+
+const html = htm.bind(React.createElement);
+const { ConfigProvider, Typography, Card, Input, Button, Select, Alert, Space, Flex, Divider, theme } = antd;
+const { Title, Paragraph, Text } = Typography;
+const { FormOutlined, CopyOutlined, CheckOutlined, UpOutlined, DownOutlined } = Icons;
+
+// Pár ukázkových kategorií s jejich vzorem názvu (token = jedno políčko + příklad hodnoty)
+const EXAMPLES = {
+  bazeny: {
+    cat: 'Bazény',
+    tokens: [
+      { label: 'Výrobce', ex: 'Marimex' },
+      { label: 'Typ', ex: 'Orlando' },
+      { label: 'Rozměr', ex: '3,66 × 1,07 m' },
+      { label: 'Produktové číslo', ex: '10340194' },
+    ],
+  },
+  sortky: {
+    cat: 'Pánské kraťasy a šortky',
+    tokens: [
+      { label: 'Značka', ex: 'Nike' },
+      { label: 'Řada', ex: 'Dry tee DFC' },
+      { label: 'Barva', ex: 'černé' },
+      { label: 'Velikost', ex: 'M' },
+    ],
+  },
+  knihy: {
+    cat: 'Knihy',
+    tokens: [
+      { label: 'Název produktu', ex: 'Tajemství' },
+      { label: 'Autor', ex: 'Julie Garwoodová' },
+    ],
+  },
+};
+
+function App() {
+  const { token } = theme.useToken();
+  const [key, setKey] = useState('bazeny');
+  const [open, setOpen] = useState(false);
+  const [vals, setVals] = useState({});
+  const [copied, setCopied] = useState(false);
+
+  const ex = EXAMPLES[key];
+  const format = ex.tokens.map(t => t.label).join(' | ');
+  const exampleName = ex.tokens.map(t => t.ex).join(' ');
+
+  // sestavený název = vyplněná pole spojená mezerou (prázdná se vynechají)
+  const assembled = ex.tokens.map(t => (vals[t.label] || '').trim()).filter(Boolean).join(' ');
+  const filledCount = ex.tokens.filter(t => (vals[t.label] || '').trim()).length;
+
+  const setVal = (label, v) => setVals(s => ({ ...s, [label]: v }));
+  const reset = () => { setVals({}); setCopied(false); };
+  const copy = () => { navigator.clipboard?.writeText(assembled); setCopied(true); setTimeout(() => setCopied(false), 1500); };
+
+  return html`
+    <div class="page">
+      <${Title} level=${2} style=${{ marginTop: 0 }}>Generátor názvu — pískoviště<//>
+      <${Alert} type="warning" showIcon style=${{ marginBottom: 16 }}
+        message="Oddělený experiment. Původní Párovací asistent zůstává beze změny — tady jen zkoušíme UX volitelného sestavení názvu." />
+
+      <${Flex} align="center" gap=${10} style=${{ marginBottom: 16 }}>
+        <${Text} type="secondary">Ukázková kategorie:<//>
+        <${Select} value=${key} onChange=${(v) => { setKey(v); reset(); setOpen(false); }} style=${{ minWidth: 240 }}
+          options=${Object.entries(EXAMPLES).map(([k, v]) => ({ value: k, label: v.cat }))} />
+      <//>
+
+      <${Card} style=${{ borderInlineStart: '4px solid ' + token.colorPrimary }}>
+        <${Text} strong>Pojmenujte produkt podle vzoru<//>
+        <${Title} level=${3} style=${{ margin: '4px 0 2px', fontWeight: 500 }}>${format}<//>
+        <${Text} type="secondary">Příklad: ${exampleName}<//>
+
+        ${!open && html`
+          <div style=${{ marginTop: 16 }}>
+            <${Button} type="dashed" icon=${html`<${FormOutlined} />`} onClick=${() => setOpen(true)}>
+              Sestavit název podle vzoru
+            <//>
+            <${Text} type="secondary" style=${{ marginInlineStart: 10, fontSize: token.fontSizeSM }}>Nepovinné — pomůžeme vám název složit.<//>
+          </div>
+        `}
+
+        ${open && html`
+          <${Divider} style=${{ margin: '16px 0' }} />
+          <${Flex} justify="space-between" align="center" style=${{ marginBottom: 12 }}>
+            <${Text} strong>Sestavení názvu<//>
+            <${Button} type="text" size="small" icon=${html`<${UpOutlined} />`} onClick=${() => setOpen(false)}>Skrýt<//>
+          <//>
+
+          <${Space} direction="vertical" size=${10} style=${{ width: '100%' }}>
+            ${ex.tokens.map(t => html`
+              <${Input} key=${t.label}
+                addonBefore=${t.label}
+                placeholder=${'např. ' + t.ex}
+                value=${vals[t.label] || ''}
+                onChange=${(e) => setVal(t.label, e.target.value)} />
+            `)}
+          <//>
+
+          <div style=${{ marginTop: 16, background: token.colorFillTertiary, borderRadius: token.borderRadiusLG, padding: '14px 16px' }}>
+            <${Text} type="secondary" style=${{ fontSize: token.fontSizeSM }}>Náhled názvu (${filledCount}/${ex.tokens.length} polí)<//>
+            <div style=${{ marginTop: 6, minHeight: 26 }}>
+              ${assembled
+                ? html`<${Text} strong style=${{ fontSize: token.fontSizeLG }}>${assembled}<//>`
+                : html`<${Text} type="secondary">Vyplňte pole výše a název se složí sám…<//>`}
+            </div>
+          </div>
+
+          <${Flex} gap=${8} style=${{ marginTop: 14 }} wrap>
+            <${Button} type="primary" disabled=${!assembled}
+              icon=${html`<${copied ? CheckOutlined : CopyOutlined} />`} onClick=${copy}>
+              ${copied ? 'Zkopírováno' : 'Zkopírovat název'}
+            <//>
+            <${Button} onClick=${reset} disabled=${filledCount === 0}>Vymazat<//>
+          <//>
+          <${Text} type="secondary" style=${{ display: 'block', marginTop: 10, fontSize: token.fontSizeSM }}>
+            Hotový název vložte do tagu PRODUCTNAME (a PRODUCT) ve feedu.
+          <//>
+        `}
+      <//>
+    </div>
+  `;
+}
+
+createRoot(document.getElementById('root')).render(html`
+  <${ConfigProvider} theme=${{ token: { colorPrimary: '#1677ff', borderRadius: 6 } }}>
+    <${App} />
+  <//>
+`);
+</script>
+</body>
+</html>

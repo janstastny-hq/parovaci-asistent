@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Heureka · Párovací asistent (prototyp)</title>
+<style>
+  html, body, #root { height: 100%; margin: 0; }
+  body { font-family: system-ui, Avenir, Helvetica, Arial, sans-serif; background:#f0f2f5; }
+  .page { max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; }
+
+  /* ---- Review mode (nástroj prototypu, NENÍ součást produktu) ---- */
+  #review-fab { position:fixed; right:20px; bottom:20px; z-index:9999;
+    background:#fff; border:1px solid #d9d9d9; border-radius:8px; padding:8px 12px;
+    box-shadow:0 4px 16px rgba(0,0,0,.12); display:flex; align-items:center; gap:8px; font:13px system-ui; }
+  body.review-on [data-proto] { outline:2px dashed #fa541c; outline-offset:2px; position:relative; }
+  body.review-on [data-proto]::after { content:"_proto"; position:absolute; top:-9px; left:6px;
+    background:#fa541c; color:#fff; font:10px/1.4 system-ui; padding:0 5px; border-radius:3px; }
+  #review-summary { display:none; position:fixed; right:20px; bottom:64px; z-index:9999;
+    max-width:320px; background:#fff; border:1px solid #d9d9d9; border-left:3px solid #fa541c;
+    border-radius:8px; padding:12px 14px; box-shadow:0 4px 16px rgba(0,0,0,.12); font:13px system-ui; color:#141414; }
+  body.review-on #review-summary { display:block; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<div id="review-fab">
+  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+    <input type="checkbox" id="review-toggle" />
+    <span>Review mode</span>
+  </label>
+  <span id="review-i" title="Review mode zvýrazní části, které NEJSOU standardní One Admin UI — vlastní _proto komponenty (vzniklé tam, kde nestačil žádný Ant vzor ani token). Měly by se přidat do knihovny (design systému), ale promoci schvaluje pouze designér."
+        style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:1px solid #bfbfbf;color:#595959;font-size:11px;cursor:help;">i</span>
+</div>
+<div id="review-summary"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@19.0.0",
+    "react/jsx-runtime": "https://esm.sh/react@19.0.0/jsx-runtime",
+    "react-dom": "https://esm.sh/react-dom@19.0.0?deps=react@19.0.0",
+    "react-dom/client": "https://esm.sh/react-dom@19.0.0/client?deps=react@19.0.0",
+    "antd": "https://esm.sh/antd@6.0.0?external=react,react-dom&bundle-deps",
+    "@ant-design/icons": "https://esm.sh/@ant-design/icons@6.0.0?external=react,react-dom&bundle-deps",
+    "htm": "https://esm.sh/htm@3.1.1"
+  }
+}
+</script>
+
+<script type="module">
+import React, { useState, useMemo } from 'react';
+import { createRoot } from 'react-dom/client';
+import * as antd from 'antd';
+import * as Icons from '@ant-design/icons';
+import htm from 'htm';
+
+const html = htm.bind(React.createElement);
+const {
+  ConfigProvider, Typography, Input, List, Card, Alert, Table, Tag, Space, Empty, Spin,
+  Rate, Button, Divider, Flex, Segmented, Tooltip, theme
+} = antd;
+const { Title, Paragraph, Text } = Typography;
+const { SearchOutlined, TrophyOutlined, LeftOutlined, CopyOutlined, CheckOutlined, InfoCircleOutlined, FormOutlined, UpOutlined } = Icons;
+
+/* =========================================================================
+   Data z reálných .txt souborů (proto-data.json) — vygenerováno původním
+   parserem HeurekaAllInOne, takže obsah je 1:1 jako v Pythonu.
+   ========================================================================= */
+const DATA = await (await fetch('./proto-data.json')).json();
+const CATEGORIES = DATA.categories;        // 3684 cest
+const RULES = DATA.rules;                  // pravidla.txt
+const PARAMS = DATA.params;                // parametry.txt (povinné)
+const PARAMS_V2 = DATA.paramsV2;           // parametry-v2.txt (doporučené)
+const RULES_KEYS = Object.keys(RULES).sort((a, b) => a.length - b.length);
+const PARAMS_KEYS = Object.keys(PARAMS).sort((a, b) => a.length - b.length);
+const PARAMS_V2_KEYS = Object.keys(PARAMS_V2).sort((a, b) => a.length - b.length);
+
+/* ---- Portovaná logika z hledat_kategorie.py (beze změny chování) ---- */
+// Kategorie, u kterých má být navíc doplněn EAN (čárový kód) — porovnává se leaf lowercase.
+const EAN_CATEGORIES = new Set([
+  'audioknihy', 'e-book elektronické knihy', 'filmy', 'hudba', 'knihy',
+  'cizojazyčné knihy', 'komiksy a manga', 'mapy a průvodci', 'učebnice',
+]);
+
+const SYNONYMA = {
+  iphone: 'mobilní telefony', ipad: 'tablety', airpods: 'sluchátka',
+  playstation: 'herní konzole', xbox: 'herní konzole', marimex: 'bazény', intex: 'bazény',
+};
+
+function dejZakladSlova(slovo) {
+  slovo = slovo.toLowerCase().trim().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (slovo.length <= 3) return slovo;
+  const koncovky = ['ova','ove','ovy','ovou','oveho','ovemu','ovych','ovym','ovymi','ami','em','ech','ich','um','ou','am','y','e','a','i','o','u'];
+  for (const k of koncovky) {
+    if (slovo.endsWith(k)) {
+      const r = slovo.slice(0, slovo.length - k.length);
+      if (r.length >= 3) return r;
+      break;
+    }
+  }
+  return slovo;
+}
+
+// Levenshteinova vzdálenost (krátká slova) — pro toleranci překlepů
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+// dvě (kmenová) slova se liší jen drobným překlepem? (porovnává se bez diakritiky)
+function jePreklep(z, zk) {
+  const fa = z.normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const fb = zk.normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (fa.length < 4 || fb.length < 4) return false;       // krátká slova nefuzzujeme
+  if (Math.abs(fa.length - fb.length) > 1) return false;
+  const max = Math.min(fa.length, fb.length) <= 5 ? 1 : 2;
+  const d = levenshtein(fa, fb);
+  return d > 0 && d <= max;
+}
+
+function vyhledejPresnouLogikou(nazevProduktu) {
+  const nazevLower = nazevProduktu.toLowerCase();
+  let rozsireny = nazevProduktu;
+  for (const [k, v] of Object.entries(SYNONYMA)) if (nazevLower.includes(k)) rozsireny += ' ' + v;
+
+  const puvodniSlova = rozsireny.split(/\s+/).map(s => s.toLowerCase()).filter(s => s.length >= 2);
+  if (!puvodniSlova.length) return [];
+  const zakladyHledanych = puvodniSlova.map(dejZakladSlova);
+  const hledaMobil = ['mobil', 'telefon', 'tel', 'phone'].some(m => zakladyHledanych.includes(dejZakladSlova(m)));
+
+  const vysledky = [];
+  for (const kat of CATEGORIES) {
+    const katLower = kat.toLowerCase();
+    const casti = katLower.split('|').map(c => c.trim());
+    const posledni = casti.length ? casti[casti.length - 1] : '';
+    const slovaKonce = posledni.split(/\s+/).filter(s => s.length > 2);
+    const zakladyKonce = slovaKonce.map(dejZakladSlova);
+
+    let body = 0, pocet = 0;
+    for (const z of zakladyHledanych) {
+      for (const zk of zakladyKonce) {
+        if (z === zk) { body += 100; pocet++; }
+        else if (z.includes(zk) || zk.includes(z)) { body += 50; pocet++; }
+        else if (jePreklep(z, zk)) { body += 40; pocet++; }
+      }
+    }
+    if (pocet > 0) {
+      if (pocet > 1) body += (pocet - 1) * 150;
+      if (zakladyKonce.length === 1 && zakladyHledanych.some(z => z === zakladyKonce[0])) body += 5000;
+      for (const zk of zakladyKonce) if (!zakladyHledanych.includes(zk)) body -= 10;
+      if (hledaMobil && posledni.includes('mobilní telefony')) body += 8000;
+      if (posledni.includes('příslušenství') || posledni.includes('pouzdra') || posledni.includes('kryty') || posledni.includes('chemie')) {
+        if (!['pouzdro','obal','kryt','drzak','prislusenstvi','chemie','filtrace'].some(p => zakladyHledanych.includes(p))) body -= 1500;
+      }
+      if (body > 0) vysledky.push({ cesta: kat, shody: body });
+    }
+  }
+  return vysledky.sort((a, b) => b.shody - a.shody);
+}
+
+function najdiNejlepsiShoduVDb(slovoHledane, databaze, keys) {
+  const klic = slovoHledane.toLowerCase().trim();
+  if (Object.prototype.hasOwnProperty.call(databaze, klic)) return databaze[klic];
+  const zaklad = dejZakladSlova(klic);
+  for (const kd of keys) { if (kd === klic || dejZakladSlova(kd) === zaklad) return databaze[kd]; }
+  for (const kd of keys) { const zd = dejZakladSlova(kd); if (zaklad.includes(zd) || zd.includes(zaklad)) return databaze[kd]; }
+  return null;
+}
+
+/* ---- Příklad hodnoty parametru (logika z web_nastroj.py) ---- */
+function prikladHodnoty(name, lang) {
+  const p = name.toLowerCase();
+  if (p.includes('objem') || p.includes('volume')) return '500 ml';
+  if (p.includes('velikost') || p.includes('size')) return 'L';
+  if (p.includes('barva') || p.includes('color') || p.includes('colour')) return lang === 'CZ' ? 'Černá' : 'Black';
+  if (p.includes('váha') || p.includes('hmotnost') || p.includes('weight')) return '1.5 kg';
+  if (p.includes('materiál') || p.includes('material')) return lang === 'CZ' ? 'Bavlna' : 'Cotton';
+  if (p.includes('šírka') || p.includes('width') || p.includes('výška') || p.includes('height')) return '60 cm';
+  return lang === 'CZ' ? 'Hodnota' : 'Value';
+}
+
+const I18N = {
+  CZ: {
+    pageTitle: 'Párovací asistent',
+    pageDesc: 'Zadejte obecný název sortimentu (např. mobil, sekačka, bazén). Nástroj vyhodnotí nejpravděpodobnější koncovou kategorii Heureky a nabídne další možné shody. Po výběru kategorie zobrazí požadovanou strukturu názvu a povinné i doporučené parametry pro feed.',
+    searchPlaceholder: 'Např. bazén Marimex kruhový 3,66 m',
+    rankHeader: 'Vyhodnocené kategorie (seřazeno podle shody)',
+    bestMatch: 'Nejlepší shoda', selected: 'Vybráno', requiredHint: 'povinné',
+    selectedLabel: 'Vybraná kategorie', showOthers: 'Zpět na ostatní možnosti',
+    copyPath: 'Zkopírovat kategorii', copied: 'Zkopírováno', example: 'Příklad',
+    eanNote: 'U této kategorie je nutné v feedu doplnit také EAN (čárový kód) produktu.',
+    step1: 'Kategorie vybrána', step2: 'Pojmenujte produkt podle vzoru', step3: 'Doplňte povinné parametry',
+    catInfo: 'Vybranou kategorii (celou cestu) zkopírujte do tagu CATEGORYTEXT ve feedu.',
+    nameInfo: 'Název produktu upravte podle vzoru v tagu PRODUCT a PRODUCTNAME ve feedu.',
+    feedNote: 'Všechny informace, které tu zjistíte (kategorii, název podle vzoru i parametry), doplňte do svého XML feedu.',
+    buildName: 'Sestavit název podle vzoru', buildOptional: 'Nepovinné — pomůžeme vám název složit.',
+    buildTitle: 'Sestavení názvu', hide: 'Skrýt', previewLabel: 'Náhled názvu',
+    previewEmpty: 'Vyplňte pole výše a název se složí sám…', copyName: 'Zkopírovat název', clear: 'Vymazat',
+    buildHint: 'Hotový název vložte do tagu PRODUCTNAME (a PRODUCT) ve feedu.',
+    ruleTitle: 'Správná struktura názvu',
+    noRule: 'Pro tuto kategorii není definováno specifické pravidlo struktury názvu.',
+    reqTitle: 'Povinné parametry', reqDesc: 'Bez těchto parametrů produkt nebude správně spárován.',
+    noReq: 'U této kategorie nejsou vyžadovány žádné povinné parametry.',
+    v2Title: 'Doporučené parametry', noV2: 'Pro tuto kategorii nejsou definovány doporučené parametry.',
+    v2Info: 'Pokud tyto parametry vyplníte, bude váš produkt lépe dohledatelný ve filtrování na Heurece.',
+    colParam: 'Název parametru', colExample: 'Příklad hodnoty', colXml: 'XML ukázka',
+    notFound: 'Pro tento produkt pravděpodobně nemáme vhodnou kategorii, zůstane tak zobrazen pouze ve fulltextovém vyhledávání.',
+    ratingTitle: 'Ohodnoťte nástroj', ratingPlaceholder: 'Máte nápad na zlepšení? Napište nám…', ratingSend: 'Odeslat hodnocení',
+    support: 'Potřebujete pomoct s nastavením feedu nebo párováním? Napište na podpora@heureka.cz.',
+    req: 'povinné', opt: 'volitelné',
+  },
+  EN: {
+    pageTitle: 'Matching assistant',
+    pageDesc: 'Enter a general product type (e.g. phone, lawn mower, pool). The tool evaluates the most probable Heureka leaf category and offers other likely matches. After you pick a category it shows the required name structure and the mandatory and recommended feed parameters.',
+    searchPlaceholder: 'e.g. Marimex round pool 3.66 m',
+    rankHeader: 'Evaluated categories (sorted by match)',
+    bestMatch: 'Best match', selected: 'Selected', requiredHint: 'required',
+    selectedLabel: 'Selected category', showOthers: 'Back to other options',
+    copyPath: 'Copy category', copied: 'Copied', example: 'Example',
+    eanNote: 'For this category you must also include the product EAN (barcode) in the feed.',
+    step1: 'Category selected', step2: 'Name the product by the template', step3: 'Add the required parameters',
+    catInfo: 'Copy the selected category (full path) into the CATEGORYTEXT tag in your feed.',
+    nameInfo: 'Edit the product name by the template in the PRODUCT and PRODUCTNAME tags in your feed.',
+    feedNote: 'Add everything you find here (the category, the templated name and the parameters) into your XML feed.',
+    buildName: 'Build the name from the template', buildOptional: 'Optional — we’ll help you assemble the name.',
+    buildTitle: 'Name builder', hide: 'Hide', previewLabel: 'Name preview',
+    previewEmpty: 'Fill the fields above and the name builds itself…', copyName: 'Copy name', clear: 'Clear',
+    buildHint: 'Paste the finished name into the PRODUCTNAME (and PRODUCT) tag in your feed.',
+    ruleTitle: 'Correct name structure',
+    noRule: 'No specific name-structure rule is defined for this category.',
+    reqTitle: 'Required parameters', reqDesc: 'Without these parameters the product will not be matched correctly.',
+    noReq: 'No required parameters for this category.',
+    v2Title: 'Recommended parameters', noV2: 'No recommended parameters defined for this category.',
+    v2Info: 'If you fill in these parameters, your product will be easier to find in filtering on Heureka.',
+    colParam: 'Parameter name', colExample: 'Example value', colXml: 'XML sample',
+    notFound: 'We probably don’t have a suitable category for this product, so it will only appear in full-text search.',
+    ratingTitle: 'Rate the tool', ratingPlaceholder: 'Have an idea for improvement? Write to us…', ratingSend: 'Submit rating',
+    support: 'Need help with feed setup or matching? Contact podpora@heureka.cz.',
+    req: 'required', opt: 'optional',
+  },
+};
+
+// koncová kategorie z cesty (jako web_nastroj.py: split('|')[-1].strip().lower())
+const leafOf = (cesta) => cesta.split('|').pop().trim().toLowerCase();
+const parseParams = (text) => (text ? text.split(',').map(s => s.trim()).filter(Boolean) : []);
+// Rozdělí pravidlo na formát (před en/em-dashem) a příklad (za ním).
+// Dělí jen na ' – '/' — ' (ne na ' - ' pomlčce uvnitř závorek pravidla).
+const splitRule = (r) => {
+  if (!r) return { format: '', example: '' };
+  const m = r.match(/\s[–—]\s/);
+  if (!m) return { format: r.trim(), example: '' };
+  const i = r.indexOf(m[0]);
+  return { format: r.slice(0, i).trim(), example: r.slice(i + m[0].length).trim() };
+};
+
+function App() {
+  const { token } = theme.useToken();
+  const [lang, setLang] = useState('CZ');
+  const [query, setQuery] = useState('');
+  const [picked, setPicked] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const [showBuilder, setShowBuilder] = useState(false);
+  const [builderVals, setBuilderVals] = useState({});
+  const [nameCopied, setNameCopied] = useState(false);
+  const t = I18N[lang];
+
+  // přesně jako web_nastroj.py: relevantní shody (>= 20), top 10
+  const top = useMemo(() => {
+    const all = vyhledejPresnouLogikou(query.trim());
+    return all.filter(s => s.shody >= 20).slice(0, 10);
+  }, [query]);
+
+  const validPick = picked && top.some(r => r.cesta === picked) ? picked : null;
+  const selected = validPick ?? (top[0]?.cesta ?? null);
+  const leaf = selected ? leafOf(selected) : '';
+  const selectedLeafName = selected ? selected.split('|').pop().trim() : '';
+  const isBest = selected && top[0] && selected === top[0].cesta;
+  const rule = selected ? najdiNejlepsiShoduVDb(leaf, RULES, RULES_KEYS) : null;
+  const required = selected ? parseParams(najdiNejlepsiShoduVDb(leaf, PARAMS, PARAMS_KEYS)) : [];
+  const v2 = selected
+    ? parseParams(najdiNejlepsiShoduVDb(leaf, PARAMS_V2, PARAMS_V2_KEYS)).sort((a, b) => a.localeCompare(b, 'cs'))
+    : [];
+
+  const onPick = (cesta) => {
+    setPicked(cesta);
+    setShowBuilder(false); setBuilderVals({}); setNameCopied(false);   // reset generátoru názvu
+  };
+  const copyPath = () => {
+    if (selected) navigator.clipboard?.writeText(selected);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const reqColumns = [
+    { title: t.colParam, dataIndex: 'name', key: 'name',
+      render: (v) => html`<${Text} strong>${v}<//>` },
+    { title: t.colExample, dataIndex: 'example', key: 'example',
+      render: (v) => html`<${Text} type="secondary">${v}<//>` },
+    { title: t.colXml, dataIndex: 'name', key: 'xml',
+      render: (_, r) => html`
+        <div style=${{ position: 'relative', background: token.colorFillTertiary,
+                       border: '1px solid ' + token.colorBorderSecondary, borderRadius: token.borderRadiusLG,
+                       padding: '12px 36px 12px 14px' }}>
+          <${Text} copyable=${{ text: r.xmlFull }} style=${{ position: 'absolute', top: 8, right: 10 }} />
+          <pre style=${{ margin: 0, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                         fontSize: token.fontSizeSM, lineHeight: 1.7, whiteSpace: 'pre',
+                         overflowX: 'auto', color: token.colorText }}>${r.xmlFull}</pre>
+        </div>` },
+  ];
+  const reqData = required.map((name, i) => {
+    const ex = prikladHodnoty(name, lang);
+    return { key: i, name, example: ex, xmlFull: `<PARAM>\n  <PARAM_NAME>${name}</PARAM_NAME>\n  <VAL>${ex}</VAL>\n</PARAM>` };
+  });
+  const v2Columns = [
+    { title: t.colParam, dataIndex: 'name', key: 'name',
+      sorter: (a, b) => a.name.localeCompare(b.name, 'cs'),
+      render: (v) => html`<${Text}>${v}<//>` },
+  ];
+  const v2Data = v2.map((name, i) => ({ key: i, name }));
+
+  // sdílený blok pravidla (použit v sloučené kartě i v seznamovém pohledu)
+  const { format: ruleFormat, example: ruleExample } = splitRule(rule);
+  const needsEan = EAN_CATEGORIES.has(leaf);
+  const ruleBlock = html`<${React.Fragment}>
+    ${rule
+      ? html`<div>
+          <${Title} level=${3} style=${{ margin: '2px 0 0', fontWeight: 500 }}>${ruleFormat}<//>
+          ${ruleExample && html`<${Text} type="secondary" style=${{ display: 'block', marginTop: 4 }}>${t.example}: ${ruleExample}<//>`}
+        </div>`
+      : html`<${Text} type="secondary">${t.noRule}<//>`}
+    ${needsEan && html`<${Alert} type="warning" showIcon style=${{ marginTop: 12 }}
+        message=${html`<${Text} strong>${t.eanNote}<//>`} />`}
+  <//>`;
+
+  // --- Volitelný generátor názvu (nepovinný, defaultně schovaný) ---
+  // tokeny vzoru: "Značka | Řada (pokud je v názvu) | …" → [{label:'Řada', hint:'pokud je v názvu'}, …]
+  const formatTokens = ruleFormat ? ruleFormat.split('|').map(s => {
+    const raw = s.trim();
+    const m = raw.match(/^(.*?)\s*\((.*)\)\s*$/);
+    return m ? { label: m[1].trim(), hint: m[2].trim() } : { label: raw, hint: '' };
+  }).filter(tk => tk.label) : [];
+  const assembledName = formatTokens.map(tk => (builderVals[tk.label] || '').trim()).filter(Boolean).join(' ');
+  const filledCount = formatTokens.filter(tk => (builderVals[tk.label] || '').trim()).length;
+  const setBVal = (label, v) => setBuilderVals(s => ({ ...s, [label]: v }));
+  const copyName = () => { if (assembledName) navigator.clipboard?.writeText(assembledName); setNameCopied(true); setTimeout(() => setNameCopied(false), 1500); };
+
+  const nameBuilder = formatTokens.length === 0 ? null : (!showBuilder
+    ? html`<div style=${{ marginTop: 14 }}>
+        <${Button} type="dashed" icon=${html`<${FormOutlined} />`} onClick=${() => setShowBuilder(true)}>${t.buildName}<//>
+        <${Text} type="secondary" style=${{ marginInlineStart: 10, fontSize: token.fontSizeSM }}>${t.buildOptional}<//>
+      </div>`
+    : html`<div style=${{ marginTop: 14 }}>
+        <${Divider} style=${{ margin: '0 0 14px' }} />
+        <${Flex} justify="space-between" align="center" style=${{ marginBottom: 12 }}>
+          <${Text} strong>${t.buildTitle}<//>
+          <${Button} type="text" size="small" icon=${html`<${UpOutlined} />`} onClick=${() => setShowBuilder(false)}>${t.hide}<//>
+        <//>
+        <${Space} direction="vertical" size=${10} style=${{ width: '100%' }}>
+          ${formatTokens.map(tk => html`<${Input} key=${tk.label} addonBefore=${tk.label} placeholder=${tk.hint}
+              value=${builderVals[tk.label] || ''} onChange=${(e) => setBVal(tk.label, e.target.value)} />`)}
+        <//>
+        <div style=${{ marginTop: 16, background: token.colorFillTertiary, borderRadius: token.borderRadiusLG, padding: '14px 16px' }}>
+          <${Text} type="secondary" style=${{ fontSize: token.fontSizeSM }}>${t.previewLabel} (${filledCount}/${formatTokens.length})<//>
+          <div style=${{ marginTop: 6, minHeight: 26 }}>
+            ${assembledName ? html`<${Text} strong style=${{ fontSize: token.fontSizeLG }}>${assembledName}<//>`
+                            : html`<${Text} type="secondary">${t.previewEmpty}<//>`}
+          </div>
+        </div>
+        <${Flex} gap=${8} style=${{ marginTop: 14 }} wrap>
+          <${Button} type="primary" disabled=${!assembledName} icon=${html`<${nameCopied ? CheckOutlined : CopyOutlined} />`} onClick=${copyName}>
+            ${nameCopied ? t.copied : t.copyName}
+          <//>
+          <${Button} onClick=${() => setBuilderVals({})} disabled=${filledCount === 0}>${t.clear}<//>
+        <//>
+        <${Text} type="secondary" style=${{ display: 'block', marginTop: 10, fontSize: token.fontSizeSM }}>${t.buildHint}<//>
+      </div>`);
+
+  // zvýrazněná kategorizační cesta: segmenty tmavší, oddělovače světlejší, poslední tučně
+  const pathParts = selected ? selected.split('|').map(s => s.trim()) : [];
+  const pathNode = html`<div style=${{ marginTop: 2 }}>
+    ${pathParts.map((p, i) => html`
+      <${React.Fragment} key=${i}>
+        <${Text} style=${{ color: i === pathParts.length - 1 ? token.colorText : token.colorTextSecondary,
+                           fontWeight: i === pathParts.length - 1 ? 600 : 400 }}>${p}<//>
+        ${i < pathParts.length - 1 && html`<span style=${{ color: token.colorTextQuaternary, margin: '0 6px' }}>|</span>`}
+      <//>`)}
+  </div>`;
+
+  // kolečko s číslem/ikonou kroku v průvodci
+  const stepBadge = (bg, color) => ({
+    width: 26, height: 26, borderRadius: '50%', background: bg, color,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    flex: '0 0 auto', fontSize: token.fontSizeSM, fontWeight: 500,
+  });
+
+  // sdílený blok povinných parametrů (popis + tabulka) — renderuje se jen když nějaké jsou
+  const reqInner = html`
+    <${Paragraph} type="secondary" style=${{ marginTop: 0 }}>${t.reqDesc}<//>
+    <${Table} columns=${reqColumns} dataSource=${reqData} pagination=${false} size="middle" />
+  `;
+
+  return html`
+    <div class="page">
+      <${Flex} justify="space-between" align="start" gap=${16} wrap="wrap">
+        <${Title} level=${2} style=${{ marginTop: 0, marginBottom: 8 }}>${t.pageTitle}<//>
+        <${Segmented} value=${lang} onChange=${setLang} options=${['CZ', 'EN']} />
+      <//>
+      <${Paragraph} type="secondary" style=${{ maxWidth: 760 }}>${t.pageDesc}<//>
+
+      <${Alert} type="info" showIcon style=${{ marginBottom: 20 }} message=${t.feedNote} />
+
+      <${Input.Search}
+        size="large" allowClear
+        placeholder=${t.searchPlaceholder}
+        prefix=${html`<${SearchOutlined} style=${{ color: token.colorTextQuaternary }} />`}
+        value=${query}
+        onChange=${(e) => { setQuery(e.target.value); setPicked(null); }}
+        style=${{ marginBottom: 20 }} />
+
+      ${query.trim() && top.length === 0 && html`<${Card}><${Empty} description=${t.notFound} /><//>`}
+
+      ${top.length > 0 && validPick && html`
+        <${Card} style=${{ marginBottom: 16, borderInlineStart: '4px solid ' + token.colorPrimary }}>
+          <${Flex} justify="flex-end" wrap style=${{ marginBottom: 14 }}>
+            <${Button} icon=${html`<${LeftOutlined} />`} onClick=${() => setPicked(null)}>${t.showOthers}<//>
+          <//>
+
+          <${Flex} gap=${12} align="start" style=${{ marginBottom: 18 }}>
+            <span style=${stepBadge(token.colorSuccessBg, token.colorSuccess)}><${CheckOutlined} /></span>
+            <div style=${{ flex: 1, minWidth: 0 }}>
+              <${Space} size=${6}>
+                <${Text} strong>${t.step1}<//>
+                <${Tooltip} title=${t.catInfo}><${InfoCircleOutlined} style=${{ color: token.colorTextTertiary, fontSize: token.fontSizeSM, cursor: 'help' }} /><//>
+              <//>
+              <${Flex} justify="space-between" align="center" gap=${12} wrap>
+                <${Title} level=${3} style=${{ margin: '2px 0 0', fontWeight: 500 }}>
+                  <${Space} align="center" wrap>
+                    ${selectedLeafName}
+                    ${isBest && html`<${Tag} color="success" icon=${html`<${TrophyOutlined} />`}>${t.bestMatch}<//>`}
+                  <//>
+                <//>
+                <${Button} type="primary" icon=${html`<${copied ? CheckOutlined : CopyOutlined} />`} onClick=${copyPath}>
+                  ${copied ? t.copied : t.copyPath}
+                <//>
+              <//>
+              ${pathNode}
+            </div>
+          <//>
+
+          <${Flex} gap=${12} align="start" style=${{ marginBottom: required.length > 0 ? 18 : 0 }}>
+            <span style=${stepBadge(token.colorPrimaryBg, token.colorPrimary)}>2</span>
+            <div style=${{ flex: 1, minWidth: 0 }}>
+              <${Space} size=${6}>
+                <${Text} strong>${t.step2}<//>
+                <${Tooltip} title=${t.nameInfo}><${InfoCircleOutlined} style=${{ color: token.colorTextTertiary, fontSize: token.fontSizeSM, cursor: 'help' }} /><//>
+              <//>
+              ${ruleBlock}
+              ${nameBuilder}
+            </div>
+          <//>
+
+          ${required.length > 0 && html`
+            <${Flex} gap=${12} align="start">
+              <span style=${stepBadge(token.colorErrorBg, token.colorError)}>3</span>
+              <div style=${{ flex: 1, minWidth: 0 }}>
+                <${Flex} justify="space-between" align="center" style=${{ marginBottom: 8 }}>
+                  <${Text} strong>${t.step3}<//>
+                  <${Tag} color="error">${required.length}<//>
+                <//>
+                ${reqInner}
+              </div>
+            <//>
+          `}
+        <//>
+      `}
+
+      ${top.length > 0 && !validPick && html`
+        <${Card} style=${{ marginBottom: 16 }} styles=${{ body: { padding: 0 } }}>
+          <${List}
+            header=${html`<${Text} strong style=${{ paddingInline: 16 }}>${t.rankHeader}<//>`}
+            dataSource=${top}
+            renderItem=${(item, idx) => {
+              const isSel = item.cesta === selected;
+              const leafName = item.cesta.split('|').pop().trim();
+              const reqHere = parseParams(najdiNejlepsiShoduVDb(leafOf(item.cesta), PARAMS, PARAMS_KEYS));
+              return html`
+                <${List.Item}
+                  onClick=${() => onPick(item.cesta)}
+                  style=${{ cursor: 'pointer', paddingInline: 16, display: 'block',
+                            background: isSel ? token.colorPrimaryBg : 'transparent',
+                            borderInlineStart: '3px solid ' + (isSel ? token.colorPrimary : 'transparent') }}>
+                  <${Space} align="center" wrap>
+                    <${Text} strong>${leafName}<//>
+                    ${idx === 0 && html`<${Tag} color="success" icon=${html`<${TrophyOutlined} />`}>${t.bestMatch}<//>`}
+                    ${isSel && idx !== 0 && html`<${Tag} color="processing">${t.selected}<//>`}
+                  <//>
+                  <div style=${{ color: token.colorTextSecondary, fontSize: token.fontSizeSM, marginTop: 2 }}>${item.cesta}</div>
+                  ${reqHere.length > 0 && html`
+                    <div style=${{ marginTop: 6 }}>
+                      <${Text} type="secondary" style=${{ fontSize: token.fontSizeSM, marginInlineEnd: 6 }}>${t.requiredHint}:<//>
+                      <${Space} size=${[4, 4]} wrap>
+                        ${reqHere.map(p => html`<${Tag} key=${p} color="error" style=${{ marginInlineEnd: 0 }}>${p}<//>`)}
+                      <//>
+                    </div>`}
+                <//>`;
+            }} />
+        <//>
+      `}
+
+      ${top.length > 0 && html`
+        <div id="proto-detail">
+          ${!validPick && html`<${Card} title=${t.ruleTitle} style=${{ marginBottom: 16 }}>${ruleBlock}<//>`}
+
+          ${!validPick && required.length > 0 && html`
+            <${Card} title=${t.reqTitle} style=${{ marginBottom: 16 }}
+              extra=${html`<${Tag} color="error">${required.length}<//>`}>
+              ${reqInner}
+            <//>`}
+
+          <${Card} extra=${html`<${Tag} color="blue">${v2.length}<//>`}
+            title=${html`<${Space} size=${6}>
+              ${t.v2Title}
+              <${Tooltip} title=${t.v2Info}>
+                <${InfoCircleOutlined} style=${{ color: token.colorTextTertiary, fontSize: token.fontSizeSM, cursor: 'help' }} />
+              <//>
+            <//>`}>
+            ${v2.length
+              ? html`<div style=${{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  ${v2.map(p => html`<${Tag} key=${p} style=${{ margin: 0, borderRadius: 20, padding: '4px 13px',
+                      background: token.colorFillTertiary, border: 'none', color: token.colorTextSecondary,
+                      fontSize: token.fontSize }}>${p}<//>`)}
+                </div>`
+              : html`<${Text} type="secondary">${t.noV2}<//>`}
+          <//>
+        </div>
+
+        <${Divider} />
+        <${Alert} type="info" showIcon message=${t.support} />
+      `}
+    </div>
+  `;
+}
+
+const root = createRoot(document.getElementById('root'));
+root.render(html`
+  <${ConfigProvider} theme=${{ token: { colorPrimary: '#1677ff', borderRadius: 6 } }}>
+    <${App} />
+  <//>
+`);
+
+/* ---- Review mode wiring (mimo produkt) ---- */
+const toggle = document.getElementById('review-toggle');
+const summary = document.getElementById('review-summary');
+function refreshSummary() {
+  const n = document.querySelectorAll('[data-proto]').length;
+  summary.innerHTML = '<b>Review mode</b><br/>Tento prototyp obsahuje <b>' + n +
+    '</b> nestandardních (<code>_proto</code>) komponent.' +
+    (n ? ' Doporučeno: přidat do knihovny. Schvaluje designér.'
+       : ' Vše je standardní One Admin UI (Ant 6).');
+}
+toggle.addEventListener('change', (e) => {
+  document.body.classList.toggle('review-on', e.target.checked);
+  if (e.target.checked) refreshSummary();
+});
+</script>
+</body>
+</html>
